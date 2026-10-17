@@ -4,6 +4,7 @@
 #include "power_thermal_cockpit_15x15.h"
 #include "power_schematic_pipeline_15x15.h"
 #include "sewn_pcb_cockpit_15x15.h"
+#include "power_usage_369_cockpit_15x15.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -536,6 +537,129 @@ static void test_sewn_pcb_failure_preserves_active(void)
           "layout validator rejects a changed stitch token");
 }
 
+static void test_power_usage_369_round_trip(void)
+{
+    const PowerUsagePayload input = {
+        {0x33, 0x69, 0x90},
+        {0x03, 0x06, 0x09, 0x30, 0x60, 0x90},
+        {0x99, 0x66, 0x33, 0xff, 0xaa, 0x55, 0x36, 0x93, 0xc0}
+    };
+    static const unsigned expected_distances[] = {3U, 6U, 9U};
+    static const char *const expected_symbols[] = {"Cu", "Ag", "Au"};
+    static const unsigned expected_atomic_numbers[] = {29U, 47U, 79U};
+    static const unsigned expected_mass_numbers[] = {63U, 107U, 197U};
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+    PowerUsagePayload decoded = {{0}, {0}, {0}};
+    FILE *report;
+    char actual[768] = {0};
+    size_t bytes_read;
+    size_t distance;
+
+    check(power_usage_369_stage(active, &input, staging) == MATRIX_STATUS_OK,
+          "3-6-9 power payload stages into mirrored grid pairs");
+    check(staging[MATRIX_ROOT_INDEX] == (int)power_usage_369_checksum(&input),
+          "3-6-9 payload and element metadata checksum is at root 112");
+    for (distance = 1; distance <= POWER_USAGE_TOTAL_BYTES; ++distance) {
+        const ElementMetadata *element = power_usage_369_element_at_distance(distance);
+        const int expected_value = distance <= POWER_USAGE_ACTIVE_BYTES
+            ? input.active[distance - 1]
+            : (distance <= POWER_USAGE_ACTIVE_BYTES + POWER_USAGE_IDLE_BYTES
+                ? input.idle[distance - POWER_USAGE_ACTIVE_BYTES - 1]
+                : input.transient[distance - POWER_USAGE_ACTIVE_BYTES
+                                  - POWER_USAGE_IDLE_BYTES - 1]);
+
+        check(staging[MATRIX_ROOT_INDEX - distance]
+                  == staging[MATRIX_ROOT_INDEX + distance],
+              "each staged power byte has an equal mirror token");
+        check((staging[MATRIX_ROOT_INDEX + distance] & 0xff) == expected_value,
+              "each staged token preserves its exact payload byte");
+        if (distance == expected_distances[0]
+            || distance == expected_distances[1]
+            || distance == expected_distances[2]) {
+            const size_t element_index =
+                distance == 3U ? 0U : (distance == 6U ? 1U : 2U);
+            check(element != NULL
+                      && strcmp(element->symbol, expected_symbols[element_index]) == 0
+                      && element->atomic_number == expected_atomic_numbers[element_index]
+                      && element->isotope_mass_number == expected_mass_numbers[element_index],
+                  "3-6-9 distance maps to the expected element metadata");
+        } else {
+            check(element == NULL, "element metadata exists only at distances 3, 6, and 9");
+        }
+    }
+
+    check(matrix_validate_and_commit(active, staging, &mismatch) == MATRIX_STATUS_OK,
+          "symmetric 3-6-9 payload commits");
+    check(power_usage_369_decode(active, &decoded) == MATRIX_STATUS_OK,
+          "committed 3-6-9 payload decodes");
+    check(memcmp(&decoded, &input, sizeof(input)) == 0,
+          "decoded active, idle, and transient blocks exactly match input");
+
+    report = tmpfile();
+    check(report != NULL, "3-6-9 report stream opens");
+    if (report == NULL) {
+        return;
+    }
+    check(power_usage_369_report(report, &decoded,
+                                 (uint32_t)active[MATRIX_ROOT_INDEX])
+              == MATRIX_STATUS_OK,
+          "3-6-9 data-only report is produced");
+    rewind(report);
+    bytes_read = fread(actual, 1, sizeof(actual) - 1, report);
+    actual[bytes_read] = '\0';
+    check(strstr(actual, "Active block (3 bytes): 33 69 90") != NULL,
+          "report decodes exact active block bytes");
+    check(strstr(actual, "Idle block (6 bytes): 03 06 09 30 60 90") != NULL,
+          "report decodes exact idle block bytes");
+    check(strstr(actual,
+                 "Transient/recovery block (9 bytes): 99 66 33 FF AA 55 36 93 C0")
+              != NULL,
+          "report decodes exact transient block bytes");
+    check(strstr(actual, "Distance 3: Cu (Z=29, neutral electrons=29, isotope mass number=63)")
+              != NULL,
+          "report includes accurate copper metadata");
+    check(strstr(actual, "Distance 6: Ag (Z=47, neutral electrons=47, isotope mass number=107)")
+              != NULL,
+          "report includes accurate silver metadata");
+    check(strstr(actual, "Distance 9: Au (Z=79, neutral electrons=79, isotope mass number=197)")
+              != NULL,
+          "report includes accurate gold metadata");
+    check(strstr(actual, "not measured") != NULL,
+          "report does not claim physical power measurement");
+    fclose(report);
+}
+
+static void test_power_usage_369_mismatch_preserves_active(void)
+{
+    const PowerUsagePayload input = {
+        {0x33, 0x69, 0x90},
+        {0x03, 0x06, 0x09, 0x30, 0x60, 0x90},
+        {0x99, 0x66, 0x33, 0xff, 0xaa, 0x55, 0x36, 0x93, 0xc0}
+    };
+    int active[MATRIX_CELL_COUNT] = {0};
+    int active_before[MATRIX_CELL_COUNT];
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+    PowerUsagePayload decoded;
+
+    check(power_usage_369_stage(active, &input, staging) == MATRIX_STATUS_OK,
+          "power-usage frame stages before fault injection");
+    staging[MATRIX_ROOT_INDEX + 3] ^= 1;
+    memcpy(active_before, active, sizeof(active));
+    check(matrix_validate_and_commit(active, staging, &mismatch)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "asymmetric power payload returns status 2");
+    check(mismatch.left_index == 109 && mismatch.right_index == 115,
+          "payload mismatch identifies the distance-3 mirrored pair");
+    check(memcmp(active, active_before, sizeof(active)) == 0,
+          "failed payload commit leaves active matrix unchanged");
+    check(power_usage_369_decode(staging, &decoded)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "decoder rejects payload mirror drift instead of correcting it");
+}
+
 int main(void)
 {
     test_successful_commit();
@@ -554,6 +678,8 @@ int main(void)
     test_sewn_pcb_layout_staging();
     test_sewn_pcb_rejects_invalid_config_without_mutation();
     test_sewn_pcb_failure_preserves_active();
+    test_power_usage_369_round_trip();
+    test_power_usage_369_mismatch_preserves_active();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

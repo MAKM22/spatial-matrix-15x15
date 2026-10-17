@@ -164,3 +164,29 @@ conductivity, stackup balance, impedance, clearances, crossings, crosstalk,
 thermal behavior, manufacturability, or circuit operation. A sewing-style
 sequence does not make conductors physically overlap safely or increase
 usable board area without electrical-design analysis.
+
+## Power-usage payload and 3-6-9 element tags
+
+`power_usage_369_cockpit_15x15` overlays the supplied example byte arrays:
+the 3-byte active block `33 69 90`, 6-byte idle block `03 06 09 30 60 90`,
+and 9-byte transient/recovery block `99 66 33 FF AA 55 36 93 C0`. These are
+fixed example payloads, not dynamic system power measurements.
+
+Each payload byte is stored in the low 8 bits of a token on the positive and
+negative cells for one linear pair distance (1–18). The upper token fields
+and periodic report identify Cu at distance 3, Ag at distance 6, and Au at
+distance 9. Their metadata is atomic number `Z` (also the electron count for
+a neutral atom) and isotope mass number: Cu-63, Ag-107, and Au-197. Mass
+number is not a count of protons or a claim about conductivity. Distance 9
+is one pair in the linear mapping, not the grid's outer boundary. The root
+checksum includes the payload and these fixed element tags.
+
+```sh
+./power_usage_369_cockpit_15x15
+./power_usage_369_cockpit_15x15 --demonstrate-failure
+```
+
+The program validates symmetry and decodes the payload; it does not measure
+power draw or verify physical electrical balance. On any payload mismatch it
+reports the offending pair and returns status 2 without committing or
+silently correcting the data.
