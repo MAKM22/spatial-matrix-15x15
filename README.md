@@ -140,3 +140,27 @@ physical return-path continuity, or electrical safety; no hardware is read
 or controlled. The failure option flips one staged mirror bit; validation
 then returns status 2, reports its grid coordinates, and leaves the active
 grid unchanged.
+
+## Sewn PCB topology model
+
+`sewn_pcb_cockpit_15x15` models a bounded abstract trace-stitch sequence over
+the 112 mirrored linear-index pairs. It tags a layout with one substrate
+(FR-4, polyimide/Kapton, or aluminum nitride), one conductor/finish (copper,
+silver ink, or ENIG copper), a lockstitch or zigzag pattern, and 1–16 logical
+traces. Each pair receives the same encoded trace/stitch token; the pattern
+changes the sequence phase. The selected tags and trace count are checksummed
+at root index 112. Staging, the common bit-for-bit mirror gate, and a second
+layout-specific check run before the layout is reported.
+
+```sh
+./sewn_pcb_cockpit_15x15
+./sewn_pcb_cockpit_15x15 --demonstrate-failure
+```
+
+This is a software topology illustration, not a PCB layout or routing tool.
+The grid mapping is linear-index reflection, not geometric PCB-layer
+symmetry. Material names are labels only; the model does not evaluate
+conductivity, stackup balance, impedance, clearances, crossings, crosstalk,
+thermal behavior, manufacturability, or circuit operation. A sewing-style
+sequence does not make conductors physically overlap safely or increase
+usable board area without electrical-design analysis.

@@ -3,6 +3,7 @@
 #include "unified_cockpit_15x15.h"
 #include "power_thermal_cockpit_15x15.h"
 #include "power_schematic_pipeline_15x15.h"
+#include "sewn_pcb_cockpit_15x15.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -415,6 +416,126 @@ static void test_power_schematic_failure_preserves_active(void)
           "decoder rejects a frame with asymmetric payload bits");
 }
 
+static void test_sewn_pcb_layout_staging(void)
+{
+    const SewnPcbConfig config = {
+        PCB_SUBSTRATE_POLYIMIDE,
+        PCB_CONDUCTOR_ENIG_COPPER,
+        PCB_STITCH_ZIGZAG,
+        4U
+    };
+    const SewnPcbConfig lockstitch = {
+        PCB_SUBSTRATE_FR4,
+        PCB_CONDUCTOR_COPPER,
+        PCB_STITCH_LOCKSTITCH,
+        4U
+    };
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+    int lockstitch_staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+    FILE *report;
+    char actual[512] = {0};
+    size_t bytes_read;
+    size_t distance;
+
+    check(sewn_pcb_stage(active, &config, staging) == MATRIX_STATUS_OK,
+          "sewn PCB layout stages successfully");
+    check(staging[MATRIX_ROOT_INDEX] == (int)sewn_pcb_layout_checksum(&config),
+          "PCB config checksum is anchored at root index 112");
+    check(sewn_pcb_validate_layout(staging, &config) == MATRIX_STATUS_OK,
+          "sewn layout sequence and mirrored pairs validate");
+    check(staging[111] == staging[113],
+          "first stitch is mirrored around the root");
+    check(sewn_pcb_stage(active, &lockstitch, lockstitch_staging) == MATRIX_STATUS_OK,
+          "alternate lockstitch layout stages");
+    check(memcmp(staging, lockstitch_staging, sizeof(staging)) != 0,
+          "zigzag and lockstitch produce distinct encoded sequences");
+
+    check(matrix_validate_and_commit(active, staging, &mismatch) == MATRIX_STATUS_OK,
+          "symmetric PCB staging commits");
+    for (distance = 1; distance <= MATRIX_ROOT_INDEX; ++distance) {
+        check(memcmp(&active[MATRIX_ROOT_INDEX - distance],
+                     &active[MATRIX_ROOT_INDEX + distance],
+                     sizeof(int)) == 0,
+              "every committed PCB trace token is mirrored");
+    }
+
+    report = tmpfile();
+    check(report != NULL, "sewn PCB report stream opens");
+    if (report == NULL) {
+        return;
+    }
+    check(sewn_pcb_report(report, &config, (uint32_t)active[MATRIX_ROOT_INDEX])
+              == MATRIX_STATUS_OK,
+          "sewn PCB layout report is generated");
+    rewind(report);
+    bytes_read = fread(actual, 1, sizeof(actual) - 1, report);
+    actual[bytes_read] = '\0';
+    check(strstr(actual, "Substrate tag: polyimide/Kapton; conductor/finish tag: ENIG copper")
+              != NULL,
+          "report describes selected material tags");
+    check(strstr(actual, "Stitch sequence: zigzag; logical traces: 4") != NULL,
+          "report describes selected stitch pattern");
+    check(strstr(actual, "no routing, impedance, crosstalk, clearance, or manufacturing rules are evaluated.")
+              != NULL,
+          "report clearly limits physical PCB claims");
+    fclose(report);
+}
+
+static void test_sewn_pcb_rejects_invalid_config_without_mutation(void)
+{
+    const SewnPcbConfig invalid_config = {
+        PCB_SUBSTRATE_FR4,
+        PCB_CONDUCTOR_COPPER,
+        PCB_STITCH_ZIGZAG,
+        SEWN_PCB_MAX_TRACES + 1U
+    };
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+    int staging_before[MATRIX_CELL_COUNT];
+    size_t index;
+
+    for (index = 0; index < MATRIX_CELL_COUNT; ++index) {
+        staging[index] = (int)index;
+        staging_before[index] = staging[index];
+    }
+    check(sewn_pcb_stage(active, &invalid_config, staging)
+              == MATRIX_STATUS_INVALID_ARGUMENT,
+          "trace count above the bounded limit is rejected");
+    check(memcmp(staging, staging_before, sizeof(staging)) == 0,
+          "invalid PCB config leaves staging grid unchanged");
+}
+
+static void test_sewn_pcb_failure_preserves_active(void)
+{
+    const SewnPcbConfig config = {
+        PCB_SUBSTRATE_FR4,
+        PCB_CONDUCTOR_COPPER,
+        PCB_STITCH_ZIGZAG,
+        4U
+    };
+    int active[MATRIX_CELL_COUNT] = {0};
+    int active_before[MATRIX_CELL_COUNT];
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+
+    check(sewn_pcb_stage(active, &config, staging) == MATRIX_STATUS_OK,
+          "PCB layout stages before fault injection");
+    staging[MATRIX_ROOT_INDEX + 1] ^= 1;
+    memcpy(active_before, active, sizeof(active));
+    check(matrix_validate_and_commit(active, staging, &mismatch)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "asymmetric PCB trace is rejected with status 2");
+    check(mismatch.left_index == 111 && mismatch.right_index == 113,
+          "PCB mismatch identifies exact mirrored coordinates");
+    check(memcmp(active, active_before, sizeof(active)) == 0,
+          "failed PCB commit leaves active grid unchanged");
+    check(sewn_pcb_validate_layout(staging, &config)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "layout validator rejects a changed stitch token");
+}
+
 int main(void)
 {
     test_successful_commit();
@@ -430,6 +551,9 @@ int main(void)
     test_power_thermal_rejects_imbalanced_power();
     test_power_schematic_round_trip();
     test_power_schematic_failure_preserves_active();
+    test_sewn_pcb_layout_staging();
+    test_sewn_pcb_rejects_invalid_config_without_mutation();
+    test_sewn_pcb_failure_preserves_active();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);
