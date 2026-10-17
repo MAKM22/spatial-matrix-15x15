@@ -88,3 +88,55 @@ The sample count is bounded to 1–1000. These are reproducible software
 workloads, not live CPU/GPU/APU utilization or actual accelerator compute.
 Connecting real GPU/APU telemetry or compute requires platform- and
 vendor-specific APIs and is outside this portable demo.
+
+## Power and thermal simulation
+
+`power_thermal_cockpit_15x15` generates bounded simulated frames for input
+power, output power, heat dissipation, core voltage, die temperature, coolant
+flow, and fan duty. It does not read physical electrical or thermal sensors
+or control hardware.
+
+The frame is rejected unless input power equals output power plus heat
+dissipation, core voltage is 500–2000 mV, die temperature is at or below its
+configured limit, coolant flow is nonzero, and fan duty is at most 100%.
+Distances 1–37 encode core power/voltage metrics, 38–74 encode thermal
+metrics, and 75–112 encode cooling/output metrics. The checksum is stored at
+root index 112. Each pair is written to a separate staging array and then
+checked by the shared mirror-validation gate before commit.
+
+```sh
+./power_thermal_cockpit_15x15
+./power_thermal_cockpit_15x15 --samples 10
+./power_thermal_cockpit_15x15 --demonstrate-failure
+```
+
+Sampling is bounded to 1–1000 frames. A power-balance or safety-bound
+violation returns status 2, prints the metric and zero-based coordinates for
+its mapped control pair to standard error, and leaves the active grid
+unchanged. The linear mirror mapping is an illustrative data layout, not a
+claim of physical power conservation or thermal equilibrium in hardware.
+`--demonstrate-failure` injects an over-temperature sample so the status-2
+diagnostic can be exercised without hardware.
+
+## Binary power-schematic payload pipeline
+
+`power_schematic_pipeline_15x15` maps the example bytes `CA B6 F0 55`
+(hexadecimal) into mirrored grid pairs and decodes them back to binary text.
+Each byte is stored most-significant bit first: input rail at pair distances
+1–8, regulation/conversion at 9–16, output push at 17–24, and return loop at
+25–32. Both cells at each distance contain the same bit. The checksum of all
+four bytes is stored at root index 112. The remaining mirrored pairs are
+preserved from the active grid and still checked by the shared gate.
+
+```sh
+./power_schematic_pipeline_15x15
+./power_schematic_pipeline_15x15 --demonstrate-failure
+```
+
+The decoded report only describes the supplied binary payload and whether
+its mirrored grid representation and root checksum validate. The byte values
+do not themselves establish a 12 V input, 5 V/3.3 V regulation, 15 A output,
+physical return-path continuity, or electrical safety; no hardware is read
+or controlled. The failure option flips one staged mirror bit; validation
+then returns status 2, reports its grid coordinates, and leaves the active
+grid unchanged.

@@ -1,6 +1,8 @@
 #include "matrix_15x15.h"
 #include "ram_cockpit_15x15.h"
 #include "unified_cockpit_15x15.h"
+#include "power_thermal_cockpit_15x15.h"
+#include "power_schematic_pipeline_15x15.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -222,6 +224,197 @@ static void test_unified_frame_rejects_invalid_memory(void)
           "invalid unified telemetry leaves staging unchanged");
 }
 
+static void test_power_thermal_frame_staging(void)
+{
+    PowerThermalSample sample;
+    PowerThermalFault fault;
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+    size_t distance;
+
+    check(power_thermal_simulate_sample(0, &sample) == MATRIX_STATUS_OK,
+          "simulated power/thermal sample is generated");
+    check(sample.power_input_mw
+              == sample.power_output_mw + sample.heat_dissipation_mw,
+          "simulated input power balances output plus heat");
+    check(power_thermal_stage_frame(active, &sample, staging, &fault)
+              == MATRIX_STATUS_OK,
+          "safe sample stages successfully");
+    check(staging[MATRIX_ROOT_INDEX] == (int)power_thermal_frame_checksum(&sample),
+          "power/thermal root stores the frame checksum");
+    check(staging[111] == (int)sample.power_input_mw
+              && staging[113] == (int)sample.power_input_mw,
+          "inner pair carries mirrored input power");
+    check(staging[MATRIX_ROOT_INDEX - 38] == (int)sample.die_temperature_millic
+              && staging[MATRIX_ROOT_INDEX + 38] == (int)sample.die_temperature_millic,
+          "middle pair carries mirrored die temperature");
+    check(staging[1] == (int)sample.coolant_flow_ml_min
+              && staging[223] == (int)sample.coolant_flow_ml_min,
+          "outer pair carries mirrored coolant flow");
+    check(matrix_validate_and_commit(active, staging, &mismatch) == MATRIX_STATUS_OK,
+          "power/thermal frame passes mirror validation");
+    for (distance = 1; distance <= MATRIX_ROOT_INDEX; ++distance) {
+        check(memcmp(&active[MATRIX_ROOT_INDEX - distance],
+                     &active[MATRIX_ROOT_INDEX + distance],
+                     sizeof(int)) == 0,
+              "all committed power/thermal pairs are equal");
+    }
+}
+
+static void test_power_thermal_failure_preserves_grid(void)
+{
+    static const char expected[] =
+        "power/thermal safety violation: die temperature "
+        "(observed vs limit, millidegrees C) = 90000, limit/reference = 85000; "
+        "control pair indices 74 (row 4, column 14) and "
+        "150 (row 10, column 0)\n";
+    PowerThermalSample sample;
+    PowerThermalFault fault;
+    int active[MATRIX_CELL_COUNT];
+    int active_before[MATRIX_CELL_COUNT];
+    int staging[MATRIX_CELL_COUNT];
+    int staging_before[MATRIX_CELL_COUNT];
+    FILE *diagnostic;
+    char actual[sizeof(expected)];
+    size_t index;
+    size_t bytes_read;
+
+    check(power_thermal_simulate_sample(0, &sample) == MATRIX_STATUS_OK,
+          "baseline power/thermal sample is generated");
+    sample.die_temperature_millic = 90000;
+
+    for (index = 0; index < MATRIX_CELL_COUNT; ++index) {
+        active[index] = (int)index;
+        staging[index] = -(int)index;
+    }
+    memcpy(active_before, active, sizeof(active));
+    memcpy(staging_before, staging, sizeof(staging));
+
+    check(power_thermal_stage_frame(active, &sample, staging, &fault)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "over-temperature frame is rejected with status 2");
+    check(fault.left_index == 74 && fault.right_index == 150,
+          "thermal fault reports its mapped control pair");
+    check(memcmp(active, active_before, sizeof(active)) == 0,
+          "rejected power/thermal frame leaves active grid unchanged");
+    check(memcmp(staging, staging_before, sizeof(staging)) == 0,
+          "rejected power/thermal frame leaves staging unchanged");
+
+    diagnostic = tmpfile();
+    check(diagnostic != NULL, "power/thermal diagnostic stream opens");
+    if (diagnostic == NULL) {
+        return;
+    }
+    check(power_thermal_report_fault(diagnostic, &fault) == MATRIX_STATUS_OK,
+          "power/thermal fault diagnostic is written and flushed");
+    rewind(diagnostic);
+    bytes_read = fread(actual, 1, sizeof(actual), diagnostic);
+    check(bytes_read == sizeof(expected) - 1,
+          "power/thermal diagnostic has the expected length");
+    if (bytes_read == sizeof(expected) - 1) {
+        check(memcmp(actual, expected, sizeof(expected) - 1) == 0,
+              "power/thermal diagnostic reports exact row/column coordinates");
+    }
+    fclose(diagnostic);
+}
+
+static void test_power_thermal_rejects_imbalanced_power(void)
+{
+    PowerThermalSample sample;
+    PowerThermalFault fault;
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+
+    check(power_thermal_simulate_sample(0, &sample) == MATRIX_STATUS_OK,
+          "power sample is generated before balance fault injection");
+    sample.heat_dissipation_mw += 1;
+    check(power_thermal_stage_frame(active, &sample, staging, &fault)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "unbalanced power sample is rejected with status 2");
+    check(fault.metric == POWER_THERMAL_FAULT_POWER_BALANCE
+              && fault.left_index == 111 && fault.right_index == 113,
+          "power balance fault is mapped to the inner control pair");
+}
+
+static void test_power_schematic_round_trip(void)
+{
+    const PowerSchematicPayload input = {0xca, 0xb6, 0xf0, 0x55};
+    int active[MATRIX_CELL_COUNT] = {0};
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+    PowerSchematicPayload decoded = {0, 0, 0, 0};
+    FILE *report;
+    char actual[512] = {0};
+    size_t bytes_read;
+
+    check(power_schematic_stage(active, &input, staging) == MATRIX_STATUS_OK,
+          "power schematic payload maps into staging grid");
+    check(staging[111] == 1 && staging[113] == 1,
+          "input rail most significant bit maps to pair distance 1");
+    check(staging[104] == 0 && staging[120] == 0,
+          "input rail least significant bit maps to pair distance 8");
+    check(staging[103] == 1 && staging[121] == 1,
+          "regulation most significant bit starts at pair distance 9");
+    check(staging[87] == 0 && staging[137] == 0,
+          "return-loop most significant bit starts at pair distance 25");
+    check(staging[MATRIX_ROOT_INDEX] == (int)power_schematic_checksum(&input),
+          "schematic checksum is anchored at root index 112");
+    check(matrix_validate_and_commit(active, staging, &mismatch) == MATRIX_STATUS_OK,
+          "schematic frame passes mirror validation and commits");
+    check(power_schematic_decode(active, &decoded) == MATRIX_STATUS_OK,
+          "committed schematic frame decodes");
+    check(memcmp(&decoded, &input, sizeof(input)) == 0,
+          "decoded bytes exactly match the supplied binary payload");
+
+    report = tmpfile();
+    check(report != NULL, "schematic report stream opens");
+    if (report == NULL) {
+        return;
+    }
+    check(power_schematic_report(report, &decoded, (uint32_t)active[MATRIX_ROOT_INDEX])
+              == MATRIX_STATUS_OK,
+          "readable schematic payload report is generated");
+    rewind(report);
+    bytes_read = fread(actual, 1, sizeof(actual) - 1, report);
+    actual[bytes_read] = '\0';
+    check(strstr(actual, "Input rail (pair distances 1-8): 11001010") != NULL,
+          "report decodes the input rail byte");
+    check(strstr(actual, "Regulation / conversion (pair distances 9-16): 10110110") != NULL,
+          "report decodes the regulation byte");
+    check(strstr(actual, "Output push (pair distances 17-24): 11110000") != NULL,
+          "report decodes the output byte");
+    check(strstr(actual, "Return loop (pair distances 25-32): 01010101") != NULL,
+          "report decodes the return-loop byte");
+    check(strstr(actual, "Electrical voltage, current, continuity, and safety were not measured.")
+              != NULL,
+          "report does not claim physical measurements");
+    fclose(report);
+}
+
+static void test_power_schematic_failure_preserves_active(void)
+{
+    PowerSchematicPayload input = {0xca, 0xb6, 0xf0, 0x55};
+    int active[MATRIX_CELL_COUNT] = {0};
+    int active_before[MATRIX_CELL_COUNT];
+    int staging[MATRIX_CELL_COUNT];
+    MatrixMismatch mismatch;
+
+    check(power_schematic_stage(active, &input, staging) == MATRIX_STATUS_OK,
+          "schematic frame stages before failure injection");
+    staging[MATRIX_ROOT_INDEX + 1] ^= 1;
+    memcpy(active_before, active, sizeof(active));
+    check(matrix_validate_and_commit(active, staging, &mismatch)
+              == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "asymmetric schematic pair is rejected with status 2");
+    check(mismatch.left_index == 111 && mismatch.right_index == 113,
+          "schematic failure identifies the exact mirrored pair");
+    check(memcmp(active, active_before, sizeof(active)) == 0,
+          "failed schematic frame leaves active grid unchanged");
+    check(power_schematic_decode(staging, &input) == MATRIX_STATUS_SYMMETRY_MISMATCH,
+          "decoder rejects a frame with asymmetric payload bits");
+}
+
 int main(void)
 {
     test_successful_commit();
@@ -232,6 +425,11 @@ int main(void)
     test_system_memory_capture();
     test_unified_frame_staging();
     test_unified_frame_rejects_invalid_memory();
+    test_power_thermal_frame_staging();
+    test_power_thermal_failure_preserves_grid();
+    test_power_thermal_rejects_imbalanced_power();
+    test_power_schematic_round_trip();
+    test_power_schematic_failure_preserves_active();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);
