@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OI / O1 Sovereign Builder (Demo)</title>
+<style>
+  body { background:#0b0f14; color:#d6e2f0; font-family:system-ui,sans-serif; margin:0; padding:2rem; }
+  main { max-width:720px; margin:0 auto; }
+  h1 { font-size:1.5rem; margin-bottom:.25rem; }
+  .banner { background:#3a2a00; border:1px solid #b88600; color:#ffd666; padding:.6rem .9rem; border-radius:6px; margin:1rem 0; }
+  label { display:block; margin:.8rem 0 .3rem; }
+  select, input { width:100%; padding:.5rem; background:#131a22; color:inherit; border:1px solid #2b3744; border-radius:4px; box-sizing:border-box; }
+  button { margin-top:1rem; padding:.7rem 1.2rem; background:#2f81f7; color:#fff; border:0; border-radius:6px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  #console { background:#05080b; border:1px solid #2b3744; border-radius:6px; margin-top:1.2rem; padding:.8rem; min-height:140px; font:13px/1.5 ui-monospace,Consolas,monospace; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>OI / O1 Sovereign Builder</h1>
+  <div class="banner" role="note">DEMO ONLY: this page is frontend-only. No build backend exists, and no ISO is compiled or downloadable.</div>
+
+  <label for="profile">Profile</label>
+  <select id="profile">
+    <option>Sovereign Base</option>
+    <option>Spatial Matrix 15x15</option>
+  </select>
+
+  <label for="name">Image name</label>
+  <input id="name" value="oi-o1-demo">
+
+  <button id="go">GENERATE &amp; COMPILE ISO (MOCK)</button>
+  <div id="console" aria-live="polite">[mock] Idle.</div>
+</main>
+<script>
+  const btn = document.getElementById('go');
+  const out = document.getElementById('console');
+  const steps = [
+    'Validating configuration...',
+    'Resolving packages...',
+    'Assembling root filesystem...',
+    'Simulating ISO build...',
+    'Simulation complete. No ISO was produced.'
+  ];
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    out.textContent = '[mock] Simulation started for "' + document.getElementById('name').value +
+      '" (' + document.getElementById('profile').value + ')\n';
+    let i = 0;
+    const t = setInterval(() => {
+      out.textContent += '[mock] ' + steps[i++] + '\n';
+      if (i === steps.length) { clearInterval(t); btn.disabled = false; }
+    }, 700);
+  });
+</script>
+</body>
+</html>

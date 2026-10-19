@@ -190,3 +190,8 @@ The program validates symmetry and decodes the payload; it does not measure
 power draw or verify physical electrical balance. On any payload mismatch it
 reports the offending pair and returns status 2 without committing or
 silently correcting the data.
+
+## OI / O1 dashboard (demo)
+
+index.html is a static, frontend-only mock dashboard that Vercel can serve from the repo root. It simulates build output only; there is no build backend and no ISO is produced.
+
